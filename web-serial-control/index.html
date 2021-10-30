@@ -1,0 +1,193 @@
+<html>
+<head>
+    <title>Servo Calibration Util</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        div {
+            padding-bottom: 20px;
+        }
+
+        .us-buttons button {
+            width: 100px;
+            height: 50px;
+        }
+    </style>
+    <script>
+        let selectedServoIndex = null;
+        let currentUs = null;
+        let lastReply = "";
+
+        function updateUI() {
+            document.getElementById("us").innerText = currentUs
+            document.getElementById("last_reply").innerText = lastReply
+        }
+
+        async function releaseAll() {
+            try {
+                const r = await fetch('/release', {
+                    method:'post',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                    })});
+                json = await r.json()
+                lastReply = json?.result || "BLANK RESPONSE"
+                updateUI()
+            }
+            catch (e) {
+                alert(e)
+            }
+        }
+
+        async function sendUpdate() {
+            if (selectedServoIndex === null || selectedServoIndex === "" || currentUs === null) {
+                return;
+            }
+            
+            const r = await fetch('/servo/' + selectedServoIndex, {
+                method:'post',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    us: currentUs
+                })});
+            json = await r.json()
+            lastReply = json?.result || "BLANK RESPONSE"
+            updateUI()
+        }
+
+        async function reset() {
+            if (selectedServoIndex === null || selectedServoIndex === "") {
+                return;
+            }
+
+            currentUs = 1500;
+            updateUI();
+            sendUpdate();
+        }
+
+        function indexUpdated() {
+            selectedServoIndex = document.getElementById("servo_index").value;
+            currentUs = null;
+            updateUI();
+        }
+
+        function updateUs(amount) {
+            if (currentUs == null) {
+                alert("Reset servo first!")
+                return;
+            }
+
+            currentUs += amount
+            updateUI();
+            sendUpdate();
+        }
+
+        async function sendIk() {
+            x = Number(document.getElementById("pos_x").value);
+            y = Number(document.getElementById("pos_y").value);
+            z = Number(document.getElementById("pos_z").value);
+
+            if (x === "" || y === "" || z === "") {
+                return;
+            }
+
+            selectedLegIndex = 0
+            
+            const r = await fetch('/leg/' + selectedLegIndex, {
+                method:'put',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    position: { x,y,z }
+                })});
+            json = await r.json()
+            lastReply = json?.result || "BLANK RESPONSE"
+            updateUI()    
+        }
+
+        async function sendDegrees() {
+            let degrees = document.getElementById("degrees").value;
+            if (degrees === "" || selectedServoIndex === null) {
+                return;
+            }
+
+            selectedLegIndex = 0
+            const r = await fetch(`/leg/${selectedLegIndex}/joint/${selectedServoIndex}`, {
+                method:'put',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    degrees
+                })});
+            json = await r.json()
+            lastReply = json?.result || "BLANK RESPONSE"
+            updateUI()    
+
+        }
+
+    </script>
+</head>
+
+<body>
+
+<h1>Calibrator</h1>
+
+<div>
+    <button style="font-size: 24px" onclick="releaseAll()">RELEASE ALL SERVOS</button>
+</div>
+
+<div>
+    last command response = <span id="last_reply"></span>
+</div>
+
+<div>
+    <label for="servo_index">Servo Index:</label>
+    <select id="servo_index" onchange="indexUpdated()">
+        <option></option>
+        <option value="0" >0</option>
+        <option value="1">1</option>
+        <option value="2">2</option>
+    </select>
+</div>
+
+<div>
+    current us = <span id="us"></span>
+    <button onclick="reset()">Reset to 1500</button>
+</div>
+
+<div class="us-buttons">
+    <div>
+        <button onclick="updateUs(-100)">-100</button>
+        <button onclick="updateUs(-10)">-10</button>
+        <button onclick="updateUs(-1)">-1</button>
+    </div>
+
+    <div>
+        <button onclick="updateUs(100)">100</button>
+        <button onclick="updateUs(10)">10</button>
+        <button onclick="updateUs(1)">1</button>
+    </div>
+</div>
+
+<div>
+    <label for="degrees">Degrees: </label>
+    <input type="number" id="degrees" />
+    <button onclick="sendDegrees()">Send</button>
+</div>
+
+<hr>
+
+<div>
+    <label for="pos_x">X: </label><input id="pos_x" type="number" />
+    <label for="pos_y">Y: </label><input id="pos_y" type="number" />
+    <label for="pos_z">Z: </label><input id="pos_z" type="number" />
+    <button onclick="sendIk()">Send</button>
+</div>
+
+</body>
+</html>
