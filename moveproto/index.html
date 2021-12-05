@@ -166,7 +166,12 @@ function updateStatus() {
     var x = controller.axes[0].toFixed(4);
     var y = controller.axes[1].toFixed(4);
     var deg = Math.atan2(x, y) * 180 / Math.PI;
-    deg = ((deg > 0 ? deg : 360 + deg) + 180) % 360
+    
+    // Transform the atan2 output of -180 - 180 to 360deg form
+    // and rotate it by 90deg as on the hexapod 0deg is straight ahead
+    deg = (deg + (360 - 90)) % 360
+    // Reverse 
+    deg = 360 - deg
     deg = Math.round(deg)
 
     var amount = Math.sqrt(x ** 2 + y ** 2).toFixed(2)

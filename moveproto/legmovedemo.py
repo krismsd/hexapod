@@ -24,7 +24,9 @@ class Leg:
         self.commitPosition()
 
     def updatePosition(self, pos):
-        success = sendCommand("legik {} {} {} {} 0".format(self.legIdx, *pos))
+        # Hexapod pos only supports int currently
+        roundedPos = (round(pos[0]), round(pos[1]), round(pos[2]))
+        success = sendCommand("legik {} {} {} {} 0".format(self.legIdx, *roundedPos))
         if success:
             self.nextPosition = pos
             return True
@@ -34,10 +36,6 @@ class Leg:
     def commitPosition(self):
         self.position = self.nextPosition
         self.bodyPosition = legToBodySpace(self.legIdx, self.nextPosition)
-
-    def getBodySpaceLiftedHeight(self, groundZ):
-        # Get height from ground (in body space) assuming groundZ represents the bodies distance from ground
-        return groundZ - self.bodyPosition[2]
 
 
 numLegs = 6
@@ -108,30 +106,35 @@ class WalkController:
             #  and move lifted legs towards stable coords
             #  once lowered if any ground legs not at stable, lift then and rerun
 
+
+            # Calc the current ground z value in body space; the lowest leg from body - assuming all ground legs are equal 
+            groundZ = self.findGroundZ()
+
             # This is the offset from our stable coordinates in body space we wish to move
             # the current/next set of air legs to - we'll select legs that are furthest from this 
             # offset to lift next
             airTargetPositionFromStable = (
                 round(self.strideLength * cosWalkAngle, 2), # x
                 round(self.strideLength * sinWalkAngle, 2), # y
+                # groundZ - self.strideHeight, # z
             )
 
-            groundZ = self.findGroundZ()
+            # Calculate our desired body coord offset move amount
+            groundLegBodyMoveDelta = (
+                -round(self.legMoveResolution * cosWalkAngle, 2), # x
+                -round(self.legMoveResolution * sinWalkAngle, 2), # y
+                0
+                # min(1, self.stablePos[2] - groundZ), # z
+            )
 
             self.cleanupGroundedLiftingLegs(groundZ)
 
             if len(self.liftingLegs) == 0:
                 self.findNewLiftingLegs(airTargetPositionFromStable)
 
-            # Calculate our desired body coord offset move amount
-            groundLegBodyMoveDelta = (
-                -round(self.legMoveResolution * cosWalkAngle, 2), # x
-                -round(self.legMoveResolution * sinWalkAngle, 2), # y
-                0, # z
-            )
-            (potentialLegBodySpaceMoves, 
-             groundBoundaryBroken, 
-             liftedBoundaryBroken) = self.calcLegPotentialMovesAndBoundaries(groundLegBodyMoveDelta, airTargetPositionFromStable)
+            potentialLegBodySpaceMoves = self.calcLegPotentialMoves(groundLegBodyMoveDelta, airTargetPositionFromStable)
+
+            (groundBoundaryBroken, liftedBoundaryBroken) = self.calcMoveBoundaryConditions(potentialLegBodySpaceMoves)
 
             finalLegPositions = self.calcFinalLegPositions(potentialLegBodySpaceMoves, groundBoundaryBroken, liftedBoundaryBroken, groundZ)
 
@@ -154,13 +157,15 @@ class WalkController:
                 
                 # Leg with highest Z is touching the ground cleanly
                 groundZ = max(groundZ, legBodyPos[2])
+        
+        # This case should never be hit as that would be require ALL legs to be lifting legs
+        if groundZ is None:
+            groundZ = 0
 
         return groundZ
 
 
     def cleanupGroundedLiftingLegs(self, groundZ):
-        # self.liftingLegs = [idx for idx in self.liftingLegs if self.legs[idx].bodyPosition[2] < groundZ]
-
         cleanedLegs = []
         for legIdx in self.liftingLegs:
             leg = self.legs[legIdx]
@@ -199,10 +204,8 @@ class WalkController:
         self.liftingLegs = next(group for group in self.LEG_GROUPS[self.maxLegsToLift] if furthestLegIdx in group)
 
 
-    def calcLegPotentialMovesAndBoundaries(self, groundLegBodyMoveDelta, airTargetPositionFromStable):
-        # Calculate potential leg target xy and boundary break conditions 
-        liftedBrokenBoundaries = []
-        groundBrokenBoundaries = []
+    def calcLegPotentialMoves(self, groundLegBodyMoveDelta, airTargetPositionFromStable):
+        # Calculate potential leg target xy
         potentialLegBodySpaceMoves = []
 
         for legIdx in range(numLegs):
@@ -211,10 +214,6 @@ class WalkController:
             legBodyPos = leg.bodyPosition
             stableBodyPos = legToBodySpace(legIdx, self.stablePos)
             
-            # The ground legs should move in reverse to push the body forward
-            # while the lifted legs should move reach forward
-            # offsetDeltaMulti = 1 if isLiftingLeg else -1
-
             potentialMove = None
             if isLiftingLeg:
                 # If air leg we should move towards the target position
@@ -224,18 +223,14 @@ class WalkController:
                 deltaYFromTarget = -(legBodyPos[1] - stableBodyPos[1] - airTargetPositionFromStable[1])
                 distanceFromTarget = coordDistance(deltaXFromTarget, deltaYFromTarget)
 
-                # The leg positions are only int's so if we're close enough consider the target reached
-                # otherwise we'll keep jumping over the target
-                distanceFromTarget = round(distanceFromTarget)
-
-                if distanceFromTarget == 0:
+                if round(distanceFromTarget, 2) == 0:
                     potentialMove = (0, 0, 0)
                 else:
                     # Ensure we move at most legMoveResolution, or just cover the delta if we're close enough
                     scaleForMove = min(self.legMoveResolution / distanceFromTarget, 1)
                     potentialMove = (
-                        scaleForMove * deltaXFromTarget,
-                        scaleForMove * deltaYFromTarget,
+                        round(scaleForMove * deltaXFromTarget, 2),
+                        round(scaleForMove * deltaYFromTarget, 2),
                         0 # Lifted leg z is handled afterwards
                     )
 
@@ -245,29 +240,43 @@ class WalkController:
 
             potentialLegBodySpaceMoves.append(potentialMove)
 
+        return potentialLegBodySpaceMoves
+
+
+    def calcMoveBoundaryConditions(self, potentialLegBodySpaceMoves):
+        # Calculate potential leg target xy and boundary break conditions 
+        liftedBrokenBoundaries = []
+        groundBrokenBoundaries = []
+
+        for legIdx in range(numLegs):
+            leg = self.legs[legIdx]
+            isLiftingLeg = legIdx in self.liftingLegs
+            legBodyPos = leg.bodyPosition
+            stableBodyPos = legToBodySpace(legIdx, self.stablePos)
+            potentialMove = potentialLegBodySpaceMoves[legIdx]
+
+            stableOffsetX = round(legBodyPos[0] - stableBodyPos[0], 2) 
+            stableOffsetY = round(legBodyPos[1] - stableBodyPos[1], 2) 
+
             # See if potential move goes outside of strideLength and report boundary breaks
             newDistanceFromStable = coordDistance(
-                legBodyPos[0] - stableBodyPos[0] + potentialMove[0],
-                legBodyPos[1] - stableBodyPos[1] + potentialMove[1]
+                stableOffsetX + potentialMove[0],
+                stableOffsetY + potentialMove[1]
             )
 
             # Leg has broken boundary if leg will be over-extended and the leg is extending further
             # i.e. If leg is moving towards a more stable position then dont consider the boundary broken
             boundaryBroken = False
-            if newDistanceFromStable + 1 >= self.strideLength:
-                currentDistanceFromStable = coordDistance(
-                    legBodyPos[0] - stableBodyPos[0],
-                    legBodyPos[1] - stableBodyPos[1]
-                )
-
+            # if newDistanceFromStable >= self.strideLength:
+            # TODO: explain this if condition
+            if self.strideLength - newDistanceFromStable < 0.02:
+                currentDistanceFromStable = coordDistance(stableOffsetX, stableOffsetY)
                 boundaryBroken = newDistanceFromStable >= currentDistanceFromStable
 
             if isLiftingLeg:
                 liftedBrokenBoundaries.append(boundaryBroken)
-                # liftedBoundaryBroken = liftedBoundaryBroken and boundaryBroken
             else:
                 groundBrokenBoundaries.append(boundaryBroken)
-                # groundBoundaryBroken = groundBoundaryBroken or boundaryBroken
 
         # Ground boundary is broken if any ground leg can't move
         groundBoundaryBroken = any(groundBrokenBoundaries)
@@ -276,23 +285,13 @@ class WalkController:
         liftedBoundaryBroken = all(liftedBrokenBoundaries)
 
         return (
-            potentialLegBodySpaceMoves,
             groundBoundaryBroken,
             liftedBoundaryBroken,
         )
-
+    
 
     def calcFinalLegPositions(self, potentialLegXYBodySpaceMoves, groundBoundaryBroken, liftedBoundaryBroken, groundZ):
-        
-        # Detect if any lifted legs are in the process of dropping/raising
-        # Assumed to be if they're not on the ground or not at stride height
-        isLiftedMidTransition = False
-        for legIdx in self.liftingLegs:
-            leg = self.legs[legIdx]
-            liftedHeight = leg.getBodySpaceLiftedHeight(groundZ)
-            if liftedHeight < self.strideHeight and liftedHeight >= 0:
-                isLiftedMidTransition = True
-                break
+        isLiftedMidTransition = self.calcIsMidLiftTransition(groundZ)
 
         finalLegPositions = []
         for legIdx in range(numLegs):
@@ -305,7 +304,7 @@ class WalkController:
                 # Lifted legs are already dropping/raising or we've exceeded all bounds
                 deltaZ = 0 # Note - Do nothing to ground legs while dropping/raising
                 if isLiftingLeg:
-                    liftedHeight = leg.getBodySpaceLiftedHeight(groundZ)
+                    liftedHeight = groundZ - leg.bodyPosition[2]
 
                     if liftedBoundaryBroken:
                         # Lower leg - inrease Z value
@@ -325,12 +324,24 @@ class WalkController:
 
             legDelta = bodyToLegSpace(legIdx, bodyDelta)
             finalLegPositions.append((
-                round(leg.position[0] + legDelta[0]),
-                round(leg.position[1] + legDelta[1]),
-                round(leg.position[2] + legDelta[2]),
+                leg.position[0] + legDelta[0],
+                leg.position[1] + legDelta[1],
+                leg.position[2] + legDelta[2],
             ))
 
         return finalLegPositions
+
+    def calcIsMidLiftTransition(self, groundZ):
+        # Detect if any lifted legs are in the process of dropping/raising
+        # A lifting leg is mid transition if its not at strideHeight - a lifting leg on the ground is also mid transition 
+        # as that means its yet to be lifted since a lifting leg on the ground will be pruned out of the lifting leg list 
+        # at the end of this tick 
+        for legIdx in self.liftingLegs:
+            leg = self.legs[legIdx]
+            liftedHeight = groundZ - leg.bodyPosition[2]
+            if liftedHeight < self.strideHeight:
+                return True
+        return False
 
 
     def updateLegs(self, finalLegPositions):
@@ -350,6 +361,10 @@ class WalkController:
             for legIdx in range(numLegs):
                 leg = self.legs[legIdx]
                 leg.commitPosition()
+
+
+
+
 
 
 
